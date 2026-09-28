@@ -38,14 +38,13 @@ The key reliability choice is to save an upload locally before attempting its Go
 - Run offline tests and lint checks in GitHub Actions for Windows and Linux.
 - Ignore local configuration, service account keys, runtime records, queue data, backups, and caches.
 
+### 4. Safe portfolio demo — Complete
+
+- Add an offline command that processes fictional SRT examples through the real parser and salary rules.
+- Render NAS, PP, and LK worksheet rows through the same row builder as production.
+- Require no Telegram credentials, Google service-account key, network calls, or access to the live Salary folder.
+
 ## Recommended next milestones
-
-### 4. Create a safe portfolio demo — High priority
-
-- Add a small synthetic set of subtitle fixtures and expected totals that contains no real user files or salary records.
-- Create a separate demo spreadsheet with fictional entries and the three destination layouts.
-- Capture screenshots from that demo only; keep the operational Salary folder and its sheets private.
-- Add a short demo walkthrough that shows `/sheet`, `/month`, a sample upload, `/status`, and `/payslit`.
 
 ### 5. Make deployment repeatable — High priority
 

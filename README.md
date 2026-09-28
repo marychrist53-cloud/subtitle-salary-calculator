@@ -91,6 +91,10 @@ Configuration paths are resolved relative to `ultimate-bot`; environment variabl
 
 `/payslit` includes salary, review totals, review-file count, total lines, and file count for NAS. PP displays salary without review fees. LK displays line and file counts only.
 
+## Try the offline demo
+
+Reviewers can run `python -X utf8 demo/run_demo.py` to see the calculated NAS, PP, and LK worksheet rows. It uses fictional subtitle samples and the same parser, pay rules, and row builder as the bot, but makes no Telegram or Google requests and needs no credentials. See [demo/README.md](demo/README.md) for an example result.
+
 ## Rules and data handling
 
 The rate and review rules are in [spec.md](spec.md). Chat settings are shared by the people in a chat. Any Telegram account can use the bot; there is no user allowlist. Undo checks the original user and chat using local metadata kept in the ignored `record_metadata.json` file.
