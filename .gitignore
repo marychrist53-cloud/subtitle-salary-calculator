@@ -1,0 +1,34 @@
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+**/sheets-service-account.json
+
+# Per-user and generated application data
+**/bot_settings.json
+**/pending_files.json
+**/sheet_ids.json
+**/record_metadata.json
+**/*.tmp
+
+# Python-generated files
+__pycache__/
+**/__pycache__/
+*.py[cod]
+
+# Local test data
+_tmp_ids.json
+
+# Local environments, caches, salary backups and migrated settings
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+**/backups/
+**/months.json
+*.log
+*.pem
+*.key
+**/*service-account*.json
+.DS_Store
+Thumbs.db

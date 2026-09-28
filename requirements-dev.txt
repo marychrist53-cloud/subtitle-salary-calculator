@@ -1,0 +1,3 @@
+-r ultimate-bot/requirements.txt
+pytest>=8,<9
+ruff>=0.11,<1
