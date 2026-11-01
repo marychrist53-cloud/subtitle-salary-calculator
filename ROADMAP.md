@@ -26,7 +26,8 @@ The key reliability choice is to save an upload locally before attempting its Go
 
 ### 2. Recovery and safe sheet updates — Complete
 
-- Save pending work before Google Sheets writes and retry after failures or restart.
+- Save pending work before Google Sheets writes and retry failures after restart with persisted exponential backoff.
+- Report permanent file errors separately from temporary sheet-write failures; `/pending` shows retry timing and `/retry` allows an immediate attempt.
 - Validate sheet structure and totals before rewriting a monthly table.
 - Snapshot old values before a write; support submitter-checked, confirmed undo.
 - Avoid adding Telegram identity or record metadata to visible salary columns.
@@ -57,7 +58,6 @@ The key reliability choice is to save an upload locally before attempting its Go
 
 - Use structured logs with a per-file correlation ID while omitting subtitle contents, bot tokens, service credentials, and personal identifiers.
 - Add a compact health/status signal for operators, including pending queue size and last successful Sheets write.
-- Make retry outcomes clearer when a file is permanently invalid versus temporarily blocked by a service outage.
 
 ### 7. Expand compatibility checks — Medium priority
 

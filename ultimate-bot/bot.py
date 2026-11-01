@@ -70,6 +70,8 @@ WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")                # e.g. https://ab
 WEBHOOK_PORT = int(os.environ.get("WEBHOOK_PORT", "8080"))
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
 BATCH_QUIET_SECONDS = int(os.environ.get("BATCH_QUIET_SECONDS", "5"))
+PENDING_RETRY_BASE_SECONDS = int(os.environ.get("PENDING_RETRY_BASE_SECONDS", "60"))
+PENDING_RETRY_MAX_SECONDS = int(os.environ.get("PENDING_RETRY_MAX_SECONDS", "3600"))
 
 SETTINGS_FILE = config_path("SETTINGS_FILE", "bot_settings.json")
 PENDING_FILES_FILE = config_path("PENDING_FILES_FILE", "pending_files.json")
@@ -89,7 +91,7 @@ BOT_COMMANDS = [
     BotCommand("resetmonth", "Alias for /reset"),
     BotCommand("resetyear", "Choose a different year for this month"),
     BotCommand("pending", "Show files waiting to be recorded"),
-    BotCommand("retry", "Retry files waiting to be recorded"),
+    BotCommand("retry", "Retry saved files now"),
     BotCommand("undo", "Preview or confirm with /undo confirm"),
 ]
 
@@ -253,41 +255,110 @@ async def month_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE, month
     await continue_pending(context, chat_id)
 
 
-async def continue_pending(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
-    """Attempt each saved item once, preserving failures and their original destination."""
-    pending = load_pending_files(PENDING_FILES_FILE, chat_id)
-    sheet, month = get_setting(chat_id, "sheet"), get_setting(chat_id, "month")
-    for item in list(pending):
-        if not item.get("sheet") or not item.get("month"):
-            if not (sheet and month):
-                continue
-            item["sheet"], item["month"] = sheet, month
-        item.setdefault("record_id", uuid4().hex)
-        item.setdefault("submitted_at", datetime.now(timezone.utc).isoformat())
-        item.setdefault("chat_id", str(chat_id))
-        save_pending_files(PENDING_FILES_FILE, chat_id, pending)
+PENDING_RETRY_IN_FLIGHT: set[int] = set()
+
+
+def _pending_retry_job_name(chat_id: int) -> str:
+    return f"pending-retry:{chat_id}"
+
+
+def schedule_pending_retry(context, chat_id: int, pending: list[dict]) -> None:
+    """Schedule the earliest persisted retry deadline for this chat."""
+    job_queue = getattr(context, "job_queue", None)
+    if job_queue is None or not callable(getattr(job_queue, "run_once", None)):
+        return
+    name = _pending_retry_job_name(chat_id)
+    get_jobs = getattr(job_queue, "get_jobs_by_name", None)
+    if callable(get_jobs):
+        for job in get_jobs(name):
+            job.schedule_removal()
+
+    deadlines = []
+    for item in pending:
         try:
-            entry = analyze_file(item["text"], item["file_name"], destination=item["sheet"])
-            entry["file_name"] = item["file_name"]
-            for key in ("record_id", "submitted_at", "submitted_by", "user_id", "chat_id"):
-                if key in item:
-                    entry[key] = item[key]
-            apply_destination(entry, item["sheet"])
-            completed = await report_result(context, chat_id, entry, item["month"])
+            deadline = float(item.get("next_retry_at", 0))
+        except (TypeError, ValueError):
+            continue
+        if deadline > 0:
+            deadlines.append(deadline)
+    if not deadlines:
+        return
+
+    now = datetime.now(timezone.utc).timestamp()
+    delay = max(0.0, min(deadlines) - now)
+    job_queue.run_once(
+        automatic_retry_job,
+        delay,
+        data=chat_id,
+        chat_id=chat_id,
+        name=name,
+    )
+
+
+async def automatic_retry_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Retry due files after a restart-safe backoff delay."""
+    chat_id = context.job.data
+    await continue_pending(context, chat_id)
+
+
+async def continue_pending(context: ContextTypes.DEFAULT_TYPE, chat_id: int, *, force: bool = False):
+    """Process ready items once, retaining failures and scheduling their next retry."""
+    if chat_id in PENDING_RETRY_IN_FLIGHT:
+        return
+    PENDING_RETRY_IN_FLIGHT.add(chat_id)
+    try:
+        pending = load_pending_files(PENDING_FILES_FILE, chat_id)
+        sheet, month = get_setting(chat_id, "sheet"), get_setting(chat_id, "month")
+        now = datetime.now(timezone.utc).timestamp()
+        for item in list(pending):
+            if not item.get("sheet") or not item.get("month"):
+                if not (sheet and month):
+                    continue
+                item["sheet"], item["month"] = sheet, month
+            try:
+                retry_at = float(item.get("next_retry_at", 0))
+            except (TypeError, ValueError):
+                retry_at = 0
+            if not force and retry_at > now:
+                continue
+
+            item.pop("next_retry_at", None)
+            item.setdefault("record_id", uuid4().hex)
+            item.setdefault("submitted_at", datetime.now(timezone.utc).isoformat())
+            item.setdefault("chat_id", str(chat_id))
+            save_pending_files(PENDING_FILES_FILE, chat_id, pending)
+            try:
+                entry = analyze_file(item["text"], item["file_name"], destination=item["sheet"])
+                entry["file_name"] = item["file_name"]
+                for key in ("record_id", "submitted_at", "submitted_by", "user_id", "chat_id"):
+                    if key in item:
+                        entry[key] = item[key]
+                apply_destination(entry, item["sheet"])
+                completed = await report_result(context, chat_id, entry, item["month"])
+            except Exception:
+                logger.exception("Queued file processing failed")
+                completed = False
+                await send_reply(context, chat_id,
+                                 f"Could not record {item.get('file_name', 'file')}. Saved for automatic retry.")
+            if completed:
+                pending.remove(item)
+            else:
+                attempts = item.get("attempts", 0) + 1
+                delay = min(PENDING_RETRY_MAX_SECONDS, PENDING_RETRY_BASE_SECONDS * (2 ** min(attempts - 1, 20)))
+                item["attempts"] = attempts
+                item["next_retry_at"] = datetime.now(timezone.utc).timestamp() + delay
+            save_pending_files(PENDING_FILES_FILE, chat_id, pending)
+        if any(not item.get("sheet") or not item.get("month") for item in pending):
+            if not sheet:
+                await ask_sheet(None, context, chat_id)
+            elif not month:
+                await ask_month(None, context, chat_id)
+    finally:
+        PENDING_RETRY_IN_FLIGHT.discard(chat_id)
+        try:
+            schedule_pending_retry(context, chat_id, load_pending_files(PENDING_FILES_FILE, chat_id))
         except Exception:
-            logger.exception("Queued file processing failed")
-            completed = False
-            await send_reply(context, chat_id, f"Could not record {item.get('file_name', 'file')}. Saved for /retry.")
-        if completed:
-            pending.remove(item)
-        else:
-            item["attempts"] = item.get("attempts", 0) + 1
-        save_pending_files(PENDING_FILES_FILE, chat_id, pending)
-    if any(not item.get("sheet") or not item.get("month") for item in pending):
-        if not sheet:
-            await ask_sheet(None, context, chat_id)
-        elif not month:
-            await ask_month(None, context, chat_id)
+            logger.exception("Could not schedule a pending-file retry for chat %s", chat_id)
 
 
 def apply_destination(entry: dict, sheet: str):
@@ -353,7 +424,10 @@ async def report_result(
     except Exception:
         logger.exception("Google Sheets record failed")
         batch["errors"] += 1
-        await send_reply(context, chat_id, f"⚠️ {entry['file_name']} could not be recorded. It is saved for /retry.")
+        await send_reply(
+            context, chat_id,
+            f"⚠️ {entry['file_name']} could not be recorded. It is saved for automatic retry; use /retry to try now.",
+        )
         schedule_batch_summary(context, chat_id)
         return False
     if result.get("duplicate"):
@@ -498,7 +572,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/resetyear — choose a different year for the selected month\n"
         "/reset — forget sheet & month\n"
         "/pending — list saved files\n"
-        "/retry — retry saved files\n"
+        "/retry — retry saved files now (failed writes retry automatically)\n"
         "/undo — preview removing your latest record"
     )
 
@@ -604,10 +678,20 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = [f"Saved files: {len(pending)}"]
     for item in pending[:20]:
         target = f"{item.get('sheet') or '?'} / {item.get('month') or '?'}"
-        lines.append(f"• {item['file_name'][:100]} → {target} (failed attempts: {item.get('attempts', 0)})")
+        retry_note = ""
+        if item.get("next_retry_at"):
+            try:
+                seconds = max(0, int(float(item["next_retry_at"]) - datetime.now(timezone.utc).timestamp()))
+                retry_note = f", automatic retry in {seconds}s"
+            except (TypeError, ValueError):
+                pass
+        lines.append(
+            f"• {item['file_name'][:100]} → {target} "
+            f"(failed attempts: {item.get('attempts', 0)}{retry_note})"
+        )
     if len(pending) > 20:
         lines.append(f"…and {len(pending) - 20} more.")
-    lines.append("Use /retry to try again. Set /sheet and /month for files with no destination.")
+    lines.append("Failed writes retry automatically. Use /retry to try now. Set /sheet and /month for untargeted files.")
     await update.message.reply_text("\n".join(lines))
 
 
@@ -616,7 +700,7 @@ async def retry_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not load_pending_files(PENDING_FILES_FILE, chat_id):
         await update.message.reply_text("No saved files are waiting.")
         return
-    await continue_pending(context, chat_id)
+    await continue_pending(context, chat_id, force=True)
 
 
 async def year_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE, year: str):
@@ -873,8 +957,10 @@ def main():
         raise SystemExit("Set TELEGRAM_BOT_TOKEN in ultimate-bot/.env")
     if BOT_MODE not in {"poll", "webhook", "bridge"}:
         raise SystemExit("BOT_MODE must be poll, webhook, or bridge")
-    if MAX_UPLOAD_BYTES <= 0 or MAX_PENDING_FILES <= 0 or BATCH_QUIET_SECONDS < 1:
-        raise SystemExit("Upload, queue, and batch limits must be positive")
+    if (MAX_UPLOAD_BYTES <= 0 or MAX_PENDING_FILES <= 0 or BATCH_QUIET_SECONDS < 1
+            or PENDING_RETRY_BASE_SECONDS <= 0
+            or PENDING_RETRY_MAX_SECONDS < PENDING_RETRY_BASE_SECONDS):
+        raise SystemExit("Upload, queue, batch, and retry limits are invalid")
     if BOT_MODE in {"webhook", "bridge"}:
         import re
         if not re.fullmatch(r"[A-Za-z0-9_-]{16,256}", WEBHOOK_SECRET):

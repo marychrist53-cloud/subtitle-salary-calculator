@@ -9,7 +9,7 @@ A Telegram bot that counts Burmese subtitle cues, calculates pay under destinati
 - **LK:** requires no rate tag and records only each filename and subtitle line count. It sorts names alphabetically and highlights names containing `fix`, `fixed`, `check`, or `checked`.
 - Counts subtitle cues rather than physical file lines. An SRT cue with a timestamp and no dialogue still counts; separator lines do not.
 - Reads SRT, ASS, and TXT files. SRT cue IDs may be omitted or use numeric forms such as `34-1`; cue separators and common timestamp precision variants are handled.
-- Keeps work that could not be written to Google Sheets in a local retry queue. `/pending` and `/retry` help recover it after a Sheets or network failure.
+- Keeps work that could not be written to Google Sheets in a local retry queue. Failed writes retry automatically with exponential backoff (60 seconds initially, capped at one hour); `/pending` shows the next retry and `/retry` tries immediately.
 - Prevents duplicate filenames within the selected destination and month. `/undo` previews a record and requires confirmation before removing it.
 
 ## How it works
@@ -18,7 +18,7 @@ A Telegram bot that counts Burmese subtitle cues, calculates pay under destinati
 2. The bot downloads the subtitle, decodes the text, validates its format, checks for Myanmar dialogue, counts cues, and reads the filename's rate tag.
 3. It calculates the amount according to the chosen destination, then stores the item locally before writing it to Google Sheets.
 4. The Sheets layer reads the month's existing records, validates their layout, rebuilds the destination's tables and totals, and applies the changes in one atomic API request. It saves a local value snapshot before each write.
-5. If Google Sheets is unavailable, the saved item stays queued for retry. Undo uses local ownership metadata to ensure the original submitter in the same chat confirms removal.
+5. If Google Sheets is unavailable, the saved item stays queued and retries automatically with persisted backoff timing. Undo uses local ownership metadata to ensure the original submitter in the same chat confirms removal.
 
 ```mermaid
 flowchart LR
@@ -86,10 +86,10 @@ Configuration paths are resolved relative to `ultimate-bot`; environment variabl
 | `/resetmonth` | Legacy alias for `/reset` |
 | `/resetyear` | Choose another year while keeping the selected month and destination |
 | `/pending` | List queued files waiting for processing |
-| `/retry` | Retry saved files once |
+| `/retry` | Retry saved files immediately, without waiting for their backoff |
 | `/undo`, `/undo confirm` | Preview and confirm removal of your latest eligible record |
 
-`/payslit` includes salary, review totals, review-file count, total lines, and file count for NAS. PP displays salary without review fees. LK displays line and file counts only.
+`/payslit` includes salary, review totals, review-file count, total lines, and file count for NAS. PP displays salary without review fees. LK displays line and file counts only. Google Sheets write failures stay in the durable queue and retry automatically; invalid or untranslated files are reported and skipped rather than retried. Retry timing is configurable with `PENDING_RETRY_BASE_SECONDS` and `PENDING_RETRY_MAX_SECONDS` in `.env`.
 
 ## Try the offline demo
 

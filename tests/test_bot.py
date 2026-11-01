@@ -40,9 +40,38 @@ def test_failure_does_not_block_other_files_and_retry_keeps_target(bot_module, m
     bot.save_setting(8, "sheet", "PP")
     record.side_effect = None
     record.return_value = {"recovered": True}
-    asyncio.run(bot.continue_pending(ctx, 8))
+    asyncio.run(bot.continue_pending(ctx, 8, force=True))
     assert record.call_args.args[0]["source"] == "NAS"
     assert record.call_args.args[1] == "9.2026"
+    assert load_pending_files(bot.PENDING_FILES_FILE, 8) == []
+
+
+def test_failed_write_uses_backoff_and_manual_retry_bypasses_wait(bot_module, monkeypatch):
+    bot = bot_module
+    settings(bot)
+    ctx = context()
+    bot.PENDING_RETRY_BASE_SECONDS = 4
+    bot.PENDING_RETRY_MAX_SECONDS = 10
+    save_pending_files(bot.PENDING_FILES_FILE, 8, [queued("Fail20ks.srt")])
+    record = Mock(side_effect=[RuntimeError("offline"), {"recovered": True}])
+    monkeypatch.setattr(bot.sheets, "record", record)
+
+    asyncio.run(bot.continue_pending(ctx, 8))
+    pending = load_pending_files(bot.PENDING_FILES_FILE, 8)
+    assert pending[0]["attempts"] == 1
+    assert 3 <= pending[0]["next_retry_at"] - datetime.now(timezone.utc).timestamp() <= 4
+    assert record.call_count == 1
+    retry_job = next(call for call in ctx.job_queue.run_once.call_args_list
+                     if call.args[0] is bot.automatic_retry_job)
+    assert retry_job.kwargs["data"] == 8
+    assert retry_job.kwargs["chat_id"] == 8
+
+    asyncio.run(bot.continue_pending(ctx, 8))
+    assert record.call_count == 1  # The automatic pass waits for the persisted deadline.
+
+    update = SimpleNamespace(effective_chat=SimpleNamespace(id=8))
+    asyncio.run(bot.retry_command(update, ctx))
+    assert record.call_count == 2
     assert load_pending_files(bot.PENDING_FILES_FILE, 8) == []
 
 
@@ -56,6 +85,29 @@ def test_startup_survives_service_failure(bot_module, monkeypatch):
                           job_queue=SimpleNamespace(run_once=Mock()), chat_data=defaultdict(dict))
     asyncio.run(bot.post_init(app))
     assert len(load_pending_files(bot.PENDING_FILES_FILE, 8)) == 1
+
+
+def test_startup_reschedules_a_persisted_retry_deadline(bot_module, monkeypatch):
+    bot = bot_module
+    settings(bot)
+    deadline = datetime.now(timezone.utc).timestamp() + 120
+    item = queued("Fail20ks.srt")
+    item.update(sheet="NAS", month="9.2026", attempts=2, next_retry_at=deadline)
+    save_pending_files(bot.PENDING_FILES_FILE, 8, [item])
+    record = Mock()
+    monkeypatch.setattr(bot.sheets, "record", record)
+    job_queue = SimpleNamespace(run_once=Mock())
+    app = SimpleNamespace(bot=SimpleNamespace(set_my_commands=AsyncMock()), job_queue=job_queue,
+                          chat_data=defaultdict(dict))
+
+    asyncio.run(bot.post_init(app))
+
+    record.assert_not_called()
+    retry_job = job_queue.run_once.call_args
+    assert retry_job.args[0] is bot.automatic_retry_job
+    assert retry_job.kwargs["data"] == 8
+    assert retry_job.kwargs["name"] == bot._pending_retry_job_name(8)
+    assert 119 <= retry_job.args[1] <= 120
 
 
 def test_upload_is_saved_before_write_with_submitter_and_time(bot_module, monkeypatch):

@@ -47,7 +47,7 @@ Sheet/month choices are shared per chat and persisted locally. Month inputs `M.Y
 
 Every valid analyzed upload is atomically saved before its Google write. Each queued item contains subtitle text, filename, stable record ID, original Telegram message ID, submitting user/chat, display name, and original submission time in UTC. Legacy queue items without identity remain processable without inventing a user identity.
 
-A queue item acquires its destination once both choices are available. This target remains fixed through retries and subsequent changes to chat settings. Attempt each file once per pass; retain failures, continue other files, and remove completed/rejected/duplicate items. Startup attempts recovery without stopping the bot on Google failures. `/retry` performs another pass; no continuous retry loop runs in the background.
+A queue item acquires its destination once both choices are available. This target remains fixed through retries and subsequent changes to chat settings. Attempt each ready file once per pass; retain write failures, continue other files, and remove completed/rejected/duplicate items. Persist each failed write's attempt count and next retry deadline. Retry automatically with exponential backoff, starting at `PENDING_RETRY_BASE_SECONDS` (default 60) and capped at `PENDING_RETRY_MAX_SECONDS` (default 3600); retry continues at the cap until success. On startup, due files are retried and future deadlines are rescheduled without stopping the bot. `/retry` bypasses the wait and tries saved files immediately. Invalid or untranslated files are terminal outcomes and are not retried.
 
 ## Sheets, history, and corrections
 
@@ -69,8 +69,8 @@ Before every record or undo write, save the old values and sheet identifiers to 
 - `/resetmonth`: legacy alias for `/reset`.
 - `/resetyear`: choose a year for the selected month while keeping the month number and sheet unchanged.
 - `/link`: spreadsheet links.
-- `/pending`: saved queue count and a bounded filename listing.
-- `/retry`: attempt saved work.
+- `/pending`: saved queue count, filenames, attempt counts, and next automatic retry time.
+- `/retry`: bypass backoff and attempt saved work immediately.
 - `/undo`, `/undo confirm`: preview and confirm removal.
 
 Reply per attempt and send a batch summary after the configured quiet interval. Failed sends are retried once; delivery cannot be guaranteed during Telegram outages. Every Telegram account can use commands, upload files, and use callbacks; no chat ID allowlist is applied. Group members share settings; manual month prompts are scoped to their chat and requesting user.
